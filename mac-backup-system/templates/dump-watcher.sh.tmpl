@@ -1,0 +1,94 @@
+#!/bin/bash
+
+# Load configuration
+CONFIG_FILE="{{SCRIPTS_PATH}}/.backup-config"
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "$(date): ERROR: Config file not found at $CONFIG_FILE" >&2
+    exit 1
+fi
+
+source "$CONFIG_FILE"
+
+# Validate required variables
+REQUIRED_VARS=("SERVER_IP" "SERVER_USER" "SERVER_HOST" "SERVER_HDD_PATH" "BACKUP_LOCATION" "DUMP_FOLDER_NAME" "SSH_KEY_PATH" "DEBOUNCE_TIME")
+for var in "${REQUIRED_VARS[@]}"; do
+    if [ -z "${!var}" ]; then
+        echo "$(date): ERROR: $var not set in config" >&2
+        exit 1
+    fi
+done
+
+# Setup paths
+WATCH_DIR="$BACKUP_LOCATION/$DUMP_FOLDER_NAME"
+REMOTE_DIR="$SERVER_HDD_PATH/mac-backup/$DUMP_FOLDER_NAME"
+LOG_FILE="$BACKUP_LOCATION/.logs/dump.log"
+
+echo "$(date): Dump watcher started" >> "$LOG_FILE"
+
+process_items() {
+    # Check for items to process
+    if [ -z "$(ls -A "$WATCH_DIR" 2>/dev/null | grep -v -E '^\.DS_Store$|^Thumbs\.db$')" ]; then
+        return
+    fi
+    
+    # Check server reachability
+    if ! ping -c 1 -W 1 "$SERVER_IP" &>/dev/null; then
+        echo "$(date): Server not reachable, waiting..." >> "$LOG_FILE"
+        return
+    fi
+    
+    # Process each top-level item
+    for item in "$WATCH_DIR"/*; do
+        [ -e "$item" ] || continue
+        
+        filename=$(basename "$item")
+        
+        # Skip system files
+        if [[ "$filename" == ".DS_Store" ]] || [[ "$filename" == "Thumbs.db" ]]; then
+            rm -rf "$item" 2>/dev/null
+            continue
+        fi
+        
+        # Determine type
+        if [ -f "$item" ]; then
+            TYPE="file"
+        elif [ -d "$item" ]; then
+            TYPE="folder"
+        else
+            continue
+        fi
+        
+        echo "$(date): Transferring $TYPE: $filename" >> "$LOG_FILE"
+        
+        # Transfer to server
+        if rsync -avz --exclude='.DS_Store' --exclude='Thumbs.db' \
+            -e "ssh -i '$SSH_KEY_PATH'" \
+            "$item" "$SERVER_USER@$SERVER_IP:$REMOTE_DIR/" >> "$LOG_FILE" 2>&1; then
+            
+            # Verify on server before deleting
+            if ssh "$SERVER_HOST" "[ -e '$REMOTE_DIR/$filename' ]" 2>/dev/null; then
+                echo "$(date): ✓ Verified, removing: $filename" >> "$LOG_FILE"
+                rm -rf "$item"
+            else
+                echo "$(date): ✗ Verification failed: $filename" >> "$LOG_FILE"
+            fi
+        else
+            echo "$(date): ✗ Transfer failed: $filename" >> "$LOG_FILE"
+        fi
+    done
+}
+
+# Watch with debounce
+last_event_time=0
+
+{{FSWATCH_PATH}} -r "$WATCH_DIR" | while read -r event; do
+    current_time=$(date +%s)
+    last_event_time=$current_time
+    
+    sleep "$DEBOUNCE_TIME"
+    
+    new_time=$(date +%s)
+    if [ $((new_time - last_event_time)) -ge "$DEBOUNCE_TIME" ]; then
+        process_items
+    fi
+done

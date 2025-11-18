@@ -1,0 +1,72 @@
+#!/bin/bash
+
+# Load configuration
+CONFIG_FILE="{{SCRIPTS_PATH}}/.backup-config"
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "$(date): ERROR: Config file not found at $CONFIG_FILE" >&2
+    exit 1
+fi
+
+source "$CONFIG_FILE"
+
+# Validate required variables
+REQUIRED_VARS=("SERVER_IP" "SERVER_USER" "SERVER_HOST" "SERVER_HDD_PATH" "BACKUP_LOCATION" "SYNC_FOLDER_NAME")
+for var in "${REQUIRED_VARS[@]}"; do
+    if [ -z "${!var}" ]; then
+        echo "$(date): ERROR: $var not set in config" >&2
+        exit 1
+    fi
+done
+
+# Setup paths
+LOCAL_DIR="$BACKUP_LOCATION/$SYNC_FOLDER_NAME"
+REMOTE_DIR="$SERVER_HDD_PATH/mac-backup/$SYNC_FOLDER_NAME"
+LOG_FILE="$BACKUP_LOCATION/.logs/sync.log"
+
+# Check if server is reachable
+if ! ping -c 1 -W 1 "$SERVER_IP" &>/dev/null; then
+    echo "$(date): Server not reachable, skipping sync" >> "$LOG_FILE"
+    exit 0
+fi
+
+echo "$(date): Starting sync" >> "$LOG_FILE"
+
+# Initialize Git on server (only once)
+if ! ssh "$SERVER_HOST" "[ -d '$REMOTE_DIR/.git' ]" 2>/dev/null; then
+    echo "$(date): Initializing Git repository on server" >> "$LOG_FILE"
+    ssh "$SERVER_HOST" "cd '$REMOTE_DIR' && \
+        git init && \
+        git config user.name 'MacBackup' && \
+        git config user.email 'backup@mac' && \
+        echo '.DS_Store' > .gitignore && \
+        echo 'Thumbs.db' >> .gitignore && \
+        echo '.unison' >> .gitignore" >> "$LOG_FILE" 2>&1
+fi
+
+# Bidirectional sync with Unison
+if ! unison "$LOCAL_DIR" "ssh://$SERVER_HOST/$REMOTE_DIR" \
+    -auto \
+    -batch \
+    -prefer newer \
+    -ignore "Name .DS_Store" \
+    -ignore "Name Thumbs.db" \
+    -ignore "Name .git" \
+    -ignore "Name .unison" \
+    -logfile "$BACKUP_LOCATION/.logs/unison.log" \
+    -silent; then
+    echo "$(date): Unison sync failed" >> "$LOG_FILE"
+    exit 1
+fi
+
+echo "$(date): Sync completed" >> "$LOG_FILE"
+
+# Git commit if there are changes
+if ssh "$SERVER_HOST" "cd '$REMOTE_DIR' && git add -A && ! git diff --cached --quiet" 2>/dev/null; then
+    COMMIT_MSG="Auto-sync from Mac - $(date +%Y-%m-%d\ %H:%M:%S)"
+    ssh "$SERVER_HOST" "cd '$REMOTE_DIR' && \
+        CHANGES=\$(git diff --cached --stat | tail -1) && \
+        git commit -m '$COMMIT_MSG' -m \"\$CHANGES\"" >> "$LOG_FILE" 2>&1
+    echo "$(date): Changes committed to Git" >> "$LOG_FILE"
+fi
+
+echo "$(date): Full cycle completed" >> "$LOG_FILE"
