@@ -1,0 +1,144 @@
+#!/bin/bash
+
+# Load configuration
+CONFIG_FILE="{{SCRIPTS_PATH}}/.backup-config"
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "$(date): ERROR: Config file not found at $CONFIG_FILE" >&2
+    exit 1
+fi
+
+source "$CONFIG_FILE"
+
+# Validate required variables
+REQUIRED_VARS=("BACKUP_LOCATION" "DUMP_FOLDER_NAME" "ICLOUD_BRIDGE_ENABLED")
+for var in "${REQUIRED_VARS[@]}"; do
+    if [ -z "${!var}" ]; then
+        echo "$(date): ERROR: $var not set in config" >&2
+        exit 1
+    fi
+done
+
+# Check if iCloud bridge is enabled
+if [ "$ICLOUD_BRIDGE_ENABLED" != "true" ]; then
+    echo "$(date): iCloud bridge is disabled" >> "$BACKUP_LOCATION/.logs/icloud.log"
+    exit 0
+fi
+
+# Setup paths
+ICLOUD_BASE="$HOME/Library/Mobile Documents/com~apple~CloudDocs"
+ICLOUD_CONFIG="{{SCRIPTS_PATH}}/.icloud-folders"
+DUMP_DIR="$BACKUP_LOCATION/$DUMP_FOLDER_NAME"
+LOG_FILE="$BACKUP_LOCATION/.logs/icloud.log"
+
+# Create iCloud config if it doesn't exist
+if [ ! -f "$ICLOUD_CONFIG" ]; then
+    touch "$ICLOUD_CONFIG"
+    echo "$(date): Created empty iCloud folders config" >> "$LOG_FILE"
+fi
+
+echo "$(date): iCloud watcher started" >> "$LOG_FILE"
+
+# Process a single file/folder from iCloud
+process_icloud_item() {
+    local rel_path="$1"
+    local full_path="$ICLOUD_BASE/$rel_path"
+    
+    # Check if item exists
+    if [ ! -e "$full_path" ]; then
+        echo "$(date): Item not found: $rel_path" >> "$LOG_FILE"
+        return
+    fi
+    
+    local filename=$(basename "$full_path")
+    
+    # Check if file is downloaded (not a placeholder)
+    if [ -f "$full_path" ]; then
+        # Use brctl to check download status
+        if brctl status "$full_path" 2>/dev/null | grep -q "downloading"; then
+            echo "$(date): File still downloading: $filename" >> "$LOG_FILE"
+            return
+        fi
+        
+        # Force download if needed
+        if ! brctl download "$full_path" 2>/dev/null; then
+            echo "$(date): Failed to download: $filename" >> "$LOG_FILE"
+            return
+        fi
+    fi
+    
+    # Wait a moment for download to complete
+    sleep 2
+    
+    # Create target directory structure in dump
+    local target_dir="$DUMP_DIR/iCloud-$(date +%Y%m%d-%H%M%S)-$filename"
+    
+    echo "$(date): Moving to dump: $filename" >> "$LOG_FILE"
+    
+    # Copy to dump folder (don't delete from iCloud immediately)
+    if cp -R "$full_path" "$target_dir" 2>/dev/null; then
+        echo "$(date): ✓ Copied to dump: $filename" >> "$LOG_FILE"
+        
+        # Optional: Evict from local storage after successful copy
+        # brctl evict "$full_path" 2>/dev/null
+    else
+        echo "$(date): ✗ Failed to copy: $filename" >> "$LOG_FILE"
+    fi
+}
+
+# Scan and process watched folders
+process_watched_folders() {
+    # Read watched folders from config
+    if [ ! -s "$ICLOUD_CONFIG" ]; then
+        return
+    fi
+    
+    while IFS= read -r rel_path; do
+        # Skip empty lines and comments
+        [[ -z "$rel_path" ]] && continue
+        [[ "$rel_path" =~ ^# ]] && continue
+        
+        process_icloud_item "$rel_path"
+    done < "$ICLOUD_CONFIG"
+}
+
+# Watch iCloud Drive for changes in configured folders
+watch_icloud() {
+    if [ ! -s "$ICLOUD_CONFIG" ]; then
+        echo "$(date): No folders configured to watch" >> "$LOG_FILE"
+        sleep 60
+        return
+    fi
+    
+    # Build watch paths from config
+    local watch_paths=()
+    while IFS= read -r rel_path; do
+        [[ -z "$rel_path" ]] && continue
+        [[ "$rel_path" =~ ^# ]] && continue
+        
+        local full_path="$ICLOUD_BASE/$rel_path"
+        if [ -e "$full_path" ]; then
+            watch_paths+=("$full_path")
+        fi
+    done < "$ICLOUD_CONFIG"
+    
+    if [ ${#watch_paths[@]} -eq 0 ]; then
+        echo "$(date): No valid paths to watch" >> "$LOG_FILE"
+        sleep 60
+        return
+    fi
+    
+    # Watch all configured paths
+    {{FSWATCH_PATH}} -r "${watch_paths[@]}" | while read -r event; do
+        echo "$(date): Change detected in iCloud" >> "$LOG_FILE"
+        sleep 5  # Debounce
+        process_watched_folders
+    done
+}
+
+# Main loop with error recovery
+while true; do
+    watch_icloud
+    echo "$(date): Watcher stopped, restarting in 10s..." >> "$LOG_FILE"
+    sleep 10
+done
+
