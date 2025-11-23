@@ -1,4 +1,4 @@
-.PHONY: help install uninstall reinstall update status logs test clean config server-setup
+.PHONY: help install uninstall reinstall update status logs test clean config server-setup icloud
 
 # Colors
 RED := \033[0;31m
@@ -28,6 +28,7 @@ help:
 	@echo "  $(CYAN)make logs$(NC)          - View live logs"
 	@echo "  $(CYAN)make test$(NC)          - Test sync manually"
 	@echo "  $(CYAN)make config$(NC)        - Edit configuration"
+	@echo "  $(CYAN)make icloud$(NC)        - Manage iCloud Drive folders"
 	@echo "  $(CYAN)make clean$(NC)         - Remove everything"
 	@echo "  $(CYAN)make server-setup$(NC)  - Setup Ubuntu server"
 	@echo ""
@@ -111,6 +112,9 @@ config:
 		launchctl load "$$HOME/Library/LaunchAgents/com.$$MAC_USER.HomeServer*.plist"; \
 		echo "$(GREEN)✅ Services reloaded$(NC)"; \
 	fi
+
+icloud:
+	@bash utils/icloud-manager.sh
 
 # ============================================================================
 # Monitoring and Testing

@@ -184,10 +184,10 @@ show_menu() {
     while true; do
         list_folders
         echo -e "${CYAN}Commands:${NC}"
-        echo "  ${BOLD}1${NC} - Browse & add folders"
-        echo "  ${BOLD}2${NC} - Remove a folder"
-        echo "  ${BOLD}3${NC} - Enable/disable bridge"
-        echo "  ${BOLD}q${NC} - Quit"
+        echo -e "  ${BOLD}1${NC} - Browse & add folders"
+        echo -e "  ${BOLD}2${NC} - Remove a folder"
+        echo -e "  ${BOLD}3${NC} - Enable/disable bridge"
+        echo -e "  ${BOLD}q${NC} - Quit"
         echo ""
         echo -e "${YELLOW}Choose an option:${NC}"
         read -r choice
